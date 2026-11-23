@@ -41,29 +41,15 @@ class OTP(Base):
     otp_hash = Column(String, nullable=False)
     is_verified = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime, nullable=True)
+    expiry_at = Column(DateTime, default=lambda: datetime.utcnow() + timedelta(minutes=5))
     user = relationship("User")
 
-    def set_otp(self, plain_otp: str, validity_minutes: int = 5):
-        """
-        Hashes the provided plain OTP and stores it in the database.
-        Also sets an expiration timestamp based on the provided validity period.
-        """
-        # Generate a bcrypt hash of the OTP
-        salt = bcrypt.gensalt()
-        hashed = bcrypt.hashpw(plain_otp.encode("utf-8"), salt)
-        self.otp_hash = hashed.decode("utf-8")
-        # Set expiration time
-        self.expires_at = datetime.utcnow() + timedelta(minutes=validity_minutes)
+    def set_otp(self, plain_otp: str):
+        """Hash and store the OTP."""
+        self.otp_hash = bcrypt.hashpw(plain_otp.encode(), bcrypt.gensalt()).decode()
 
     def verify_otp(self, plain_otp: str) -> bool:
-        """
-        Verifies a plain OTP against the stored hash and checks expiration.
-        Returns True if the OTP is correct and not expired; otherwise False.
-        """
-        if self.expires_at and datetime.utcnow() > self.expires_at:
+        """Verify a provided OTP against the stored hash."""
+        if datetime.utcnow() > self.expiry_at:
             return False
-        try:
-            return bcrypt.checkpw(plain_otp.encode("utf-8"), self.otp_hash.encode("utf-8"))
-        except Exception:
-            return False
+        return bcrypt.checkpw(plain_otp.encode(), self.otp_hash.encode())

@@ -21,70 +21,70 @@ ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
 
 # Validate critical environment variables
 if not SECRET_KEY:
-    raise RuntimeError("Environment variable SECRET_KEY is not set.")
+    raise RuntimeError("Missing required environment variable: SECRET_KEY")
 if not ALGORITHM:
-    raise RuntimeError("Environment variable ALGORITHM is not set.")
+    raise RuntimeError("Missing required environment variable: ALGORITHM")
 if not ACCESS_TOKEN_EXPIRE_MINUTES:
-    raise RuntimeError("Environment variable ACCESS_TOKEN_EXPIRE_MINUTES is not set.")
+    raise RuntimeError("Missing required environment variable: ACCESS_TOKEN_EXPIRE_MINUTES")
 
 try:
     ACCESS_TOKEN_EXPIRE_MINUTES = int(ACCESS_TOKEN_EXPIRE_MINUTES)
 except ValueError:
-    raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be an integer.")
+    raise RuntimeError("ACCESS_TOKEN_EXPIRE_MINUTES must be an integer")
 
-
-def hash_password(password: str) -> str:
+def hash_password(password: str):
     return pwd_context.hash(password)
 
-
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)
 
-
-def create_access_token(data: dict) -> str:
+def create_access_token(data: dict):
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-
 auth_router = APIRouter(prefix="/auth", tags=["Auth"])
-
 
 @auth_router.post("/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(User).filter(User.email == user.email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+    try:
+        existing_user = db.query(User).filter(User.email == user.email).first()
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Email already registered")
 
-    new_user = User(
-        user_name=user.user_name,
-        email=user.email,
-        password=hash_password(user.password)
-    )
+        new_user = User(
+            user_name=user.user_name,
+            email=user.email,
+            password=hash_password(user.password)
+        )
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
 
-    return {"message": "User created successfully"}
-
+        return {"message": "User created successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @auth_router.post("/login")
 def login(user: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.email == user.username).first()
+    try:
+        db_user = db.query(User).filter(User.email == user.username).first()
 
-    if not db_user or not verify_password(user.password, db_user.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        if not db_user or not verify_password(user.password, db_user.password):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token({"sub": str(db_user.id)})
+        token = create_access_token({"sub": db_user.id})
 
-    return {
-        "access_token": token,
-        "token_type": "bearer"
-    }
+        return {
+            "access_token": token,
+            "token_type": "bearer"
+        }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @auth_router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):

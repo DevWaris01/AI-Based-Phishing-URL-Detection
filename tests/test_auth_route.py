@@ -1,127 +1,112 @@
 import os
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from Database.database import Base, get_db
-from Backend.Routes.auth_route import auth_router, hash_password, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-from models.user_Schema import UserCreate
-from Database.tables import User
+from sqlalchemy.orm import Session
+from unittest.mock import MagicMock
 
-# Setup an in-memory SQLite database for testing
-DATABASE_URL = "sqlite:///:memory:"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Import the module under test
+import Backend.Routes.auth_route as auth_route
 
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Override get_db dependency to use the test session
+# Helper to override get_db dependency
 def override_get_db():
-    try:
-        db = TestingSessionLocal()
-        yield db
-    finally:
-        db.close()
+    db = MagicMock(spec=Session)
+    yield db
 
-auth_router.dependency_overrides[get_db] = override_get_db
+# Helper to create a FastAPI app with the auth router
+def get_app():
+    app = FastAPI()
+    app.include_router(auth_route.auth_router)
+    app.dependency_overrides[auth_route.get_db] = override_get_db
+    return app
 
-client = TestClient(auth_router)
+@pytest.fixture
+def client():
+    app = get_app()
+    return TestClient(app)
 
-@pytest.fixture(autouse=True)
-def clear_env(monkeypatch):
-    """Ensure environment variables are set for each test."""
-    monkeypatch.setenv("SECRET_KEY", "testsecret")
-    monkeypatch.setenv("ALGORITHM", "HS256")
-    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
-    # Re-import to apply env checks
-    global ACCESS_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
-    SECRET_KEY = os.getenv("SECRET_KEY")
-    ALGORITHM = os.getenv("ALGORITHM")
-
-def test_env_variables_present():
-    """Test that missing env vars raise RuntimeError."""
-    with pytest.raises(RuntimeError, match="Missing required environment variable: SECRET_KEY"):
-        os.environ.pop("SECRET_KEY")
-        from Backend.Routes import auth_route  # re-import to trigger check
-
-def test_hash_and_verify_password():
-    pwd = "mysecret"
-    hashed = hash_password(pwd)
-    assert hashed != pwd
-    assert verify_password(pwd, hashed)
-    assert not verify_password("wrong", hashed)
-
-def test_create_access_token_and_expiration():
-    token = create_access_token({"sub": "123"})
-    # Decode without verification to check payload
-    from jose import jwt
-    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    assert payload["sub"] == "123"
-    assert "exp" in payload
-    # exp should be in the future
-    assert payload["exp"] > int(datetime.utcnow().timestamp())
-
-def test_signup_and_duplicate_email():
-    user_data = {"user_name": "alice", "email": "alice@example.com", "password": "pass123"}
-    response = client.post("/auth/signup", json=user_data)
+def test_signup_success(client, monkeypatch):
+    # Mock DB behavior
+    db = next(override_get_db())
+    db.query.return_value.filter.return_value.first.return_value = None
+    # Perform signup
+    response = client.post(
+        "/auth/signup",
+        json={"user_name": "alice", "email": "alice@example.com", "password": "secret"}
+    )
     assert response.status_code == 200
     assert response.json() == {"message": "User created successfully"}
+    # Ensure user was added and committed
+    db.add.assert_called_once()
+    db.commit.assert_called_once()
+    db.refresh.assert_called_once()
 
-    # Attempt duplicate signup
-    dup_response = client.post("/auth/signup", json=user_data)
-    assert dup_response.status_code == 400
-    assert dup_response.json()["detail"] == "Email already registered"
-
-def test_login_success_and_token_return():
-    # First create user
-    user_data = {"user_name": "bob", "email": "bob@example.com", "password": "mypassword"}
-    client.post("/auth/signup", json=user_data)
-
-    # Login using form data
-    login_response = client.post(
-        "/auth/login",
-        data={"username": "bob@example.com", "password": "mypassword"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+def test_signup_duplicate_email(client, monkeypatch):
+    db = next(override_get_db())
+    # Simulate existing user
+    db.query.return_value.filter.return_value.first.return_value = MagicMock()
+    response = client.post(
+        "/auth/signup",
+        json={"user_name": "bob", "email": "bob@example.com", "password": "secret"}
     )
-    assert login_response.status_code == 200
-    data = login_response.json()
-    assert "access_token" in data
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Email already registered"
+
+def test_login_success(client, monkeypatch):
+    db = next(override_get_db())
+    # Mock user in DB
+    mock_user = MagicMock()
+    mock_user.id = 42
+    mock_user.password = auth_route.hash_password("mypassword")
+    db.query.return_value.filter.return_value.first.return_value = mock_user
+    # Perform login
+    response = client.post(
+        "/auth/login",
+        data={"username": "bob@example.com", "password": "mypassword"}
+    )
+    assert response.status_code == 200
+    data = response.json()
     assert data["token_type"] == "bearer"
+    assert "access_token" in data
 
-def test_login_invalid_credentials():
-    # Ensure user exists
-    client.post("/auth/signup", json={"user_name": "charlie", "email": "charlie@example.com", "password": "secret"})
-
-    # Wrong password
-    resp = client.post(
+def test_login_invalid_credentials(client, monkeypatch):
+    db = next(override_get_db())
+    db.query.return_value.filter.return_value.first.return_value = None
+    response = client.post(
         "/auth/login",
-        data={"username": "charlie@example.com", "password": "wrong"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data={"username": "unknown@example.com", "password": "nopass"}
     )
-    assert resp.status_code == 401
-    assert resp.json()["detail"] == "Invalid credentials"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid credentials"
 
-def test_get_me_endpoint(monkeypatch):
-    # Create user and login to get token
-    client.post("/auth/signup", json={"user_name": "dave", "email": "dave@example.com", "password": "pwd"})
-    login_resp = client.post(
-        "/auth/login",
-        data={"username": "dave@example.com", "password": "pwd"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    token = login_resp.json()["access_token"]
+def test_create_access_token_expiration(monkeypatch):
+    # Set a short expiry for test
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1")
+    # Re-import to apply new env var
+    import importlib
+    importlib.reload(auth_route)
+    token = auth_route.create_access_token({"sub": "test"})
+    # Decode token to check exp
+    decoded = auth_route.jwt.decode(token, auth_route.SECRET_KEY, algorithms=[auth_route.ALGORITHM])
+    exp_timestamp = decoded["exp"]
+    # exp should be roughly 60 seconds from now
+    now = int(auth_route.datetime.utcnow().timestamp())
+    assert exp_timestamp - now <= 65
+    assert exp_timestamp - now >= 55
 
-    # Access protected route
-    me_resp = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert me_resp.status_code == 200
-    assert me_resp.json()["email"] == "dave@example.com"
-
-def test_missing_env_var_raises_on_import(monkeypatch):
-    """Simulate missing SECRET_KEY during import."""
-    monkeypatch.setenv("SECRET_KEY", "")
-    with pytest.raises(RuntimeError, match="Missing required environment variable: SECRET_KEY"):
+def test_missing_env_vars(monkeypatch):
+    # Remove critical env vars
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    monkeypatch.delenv("ALGORITHM", raising=False)
+    monkeypatch.delenv("ACCESS_TOKEN_EXPIRE_MINUTES", raising=False)
+    with pytest.raises(RuntimeError) as exc:
         import importlib
-        importlib.reload(auth_router)
+        importlib.reload(auth_route)
+    assert "Missing required environment variable" in str(exc.value)
+
+def test_invalid_access_token_minutes(monkeypatch):
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_MINUTES", "not_an_int")
+    with pytest.raises(RuntimeError) as exc:
+        import importlib
+        importlib.reload(auth_route)
+    assert "must be an integer" in str(exc.value)

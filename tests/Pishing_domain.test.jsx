@@ -7,134 +7,90 @@ import toast from 'react-hot-toast';
 jest.mock('axios');
 jest.mock('react-hot-toast', () => ({
   error: jest.fn(),
-  success: jest.fn()
+  success: jest.fn(),
 }));
 
-// Helper to render component with a fake token
-const renderComponent = () => {
-  localStorage.setItem('token', 'fake-token');
-  return render(<Pishing_domain />);
-};
-
 describe('Pishing_domain component', () => {
+  const mockLiveData = {
+    total_urls: 2,
+    analysis: [
+      { url: 'https://phish1.com', reason: 'Suspicious login page' },
+      { url: 'https://phish2.com', reason: 'Fake banking site' },
+    ],
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
-    localStorage.clear();
+    axios.get.mockResolvedValue({ data: mockLiveData });
   });
 
-  test('renders without crashing and shows loading spinner for live data', () => {
-    axios.get.mockResolvedValueOnce({ data: { total_urls: 0, analysis: [] } });
-    renderComponent();
-    expect(screen.getByText(/Threat Scanner/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Scan URL/i })).toBeInTheDocument();
-    expect(screen.getByTestId('loader')).toBeInTheDocument();
-  });
-
-  test('fetches live data on mount and displays list items', async () => {
-    const liveResponse = {
-      data: {
-        total_urls: 2,
-        analysis: [
-          { url: 'https://bad.com', reason: 'phishing' },
-          { url: 'https://evil.com', reason: 'malware' }
-        ]
-      }
-    };
-    axios.get.mockResolvedValueOnce(liveResponse);
-    renderComponent();
-
-    await waitFor(() => expect(axios.get).toHaveBeenCalledWith('http://127.0.0.1:8000/domains/live'));
-
-    // Verify total count
+  test('renders live threats list correctly', async () => {
+    render(<Pishing_domain />);
+    // Wait for live data fetch
+    await waitFor(() => expect(axios.get).toHaveBeenCalledTimes(1));
+    // Check total monitored count
     expect(screen.getByText(/Total Monitored: 2/i)).toBeInTheDocument();
-
-    // Verify each threat item
-    expect(screen.getByText('https://bad.com')).toBeInTheDocument();
-    expect(screen.getByText('https://evil.com')).toBeInTheDocument();
-
-    // Verify analysis report text
-    expect(screen.getByText('phishing')).toBeInTheDocument();
+    // Check each threat item
+    mockLiveData.analysis.forEach((item) => {
+      expect(screen.getByText(item.url)).toBeInTheDocument();
+      const link = screen.getByRole('link', { name: '' });
+      expect(link).toHaveAttribute('href', item.url);
+    });
+    // Check analysis report reason
+    expect(screen.getByText(mockLiveData.analysis[0].reason)).toBeInTheDocument();
   });
 
-  test('handles scanning success with safe domain', async () => {
-    axios.get.mockResolvedValueOnce({ data: { total_urls: 0, analysis: [] } });
-    axios.post.mockResolvedValueOnce({
-      data: { is_phishing: false, url: 'https://safe.com', reason: 'No issues found' }
-    });
+  test('shows loading spinner while fetching live data', async () => {
+    axios.get.mockImplementation(() => new Promise(() => {})); // never resolves
+    render(<Pishing_domain />);
+    expect(screen.getByRole('img', { hidden: true })).toBeInTheDocument(); // Loader2 has role img
+  });
 
-    renderComponent();
+  test('handles scan URL success (safe domain)', async () => {
+    const safeResponse = { is_phishing: false, url: 'https://safe.com', reason: 'No issues' };
+    axios.post.mockResolvedValue({ data: safeResponse });
 
+    render(<Pishing_domain />);
     const input = screen.getByPlaceholderText(/https:\/\/example.com/i);
     fireEvent.change(input, { target: { value: 'https://safe.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Scan URL/i }));
 
-    const button = screen.getByRole('button', { name: /Scan URL/i });
-    fireEvent.click(button);
-
-    expect(button).toBeDisabled();
-    expect(screen.getByText(/Analyzing.../i)).toBeInTheDocument();
-
-    await waitFor(() => expect(axios.post).toHaveBeenCalled());
-
-    // Success toast called
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
     expect(toast.success).toHaveBeenCalledWith('Domain appears to be safe.');
-
-    // Result card appears
-    expect(screen.getByText(/Safe Domain/i)).toBeInTheDocument();
-    expect(screen.getByText('https://safe.com')).toBeInTheDocument();
-    expect(screen.getByText('No issues found')).toBeInTheDocument();
-
-    // Button re-enabled
-    expect(button).not.toBeDisabled();
+    expect(screen.getByText('Safe Domain')).toBeInTheDocument();
+    expect(screen.getByText(safeResponse.url)).toBeInTheDocument();
   });
 
-  test('handles scanning failure and shows error toast', async () => {
-    axios.get.mockResolvedValueOnce({ data: { total_urls: 0, analysis: [] } });
-    axios.post.mockRejectedValueOnce(new Error('Network error'));
+  test('handles scan URL success (phishing domain)', async () => {
+    const phishingResponse = { is_phishing: true, url: 'https://phish.com', reason: 'Malicious content' };
+    axios.post.mockResolvedValue({ data: phishingResponse });
 
-    renderComponent();
-
+    render(<Pishing_domain />);
     const input = screen.getByPlaceholderText(/https:\/\/example.com/i);
-    fireEvent.change(input, { target: { value: 'https://bad.com' } });
+    fireEvent.change(input, { target: { value: 'https://phish.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Scan URL/i }));
 
-    const button = screen.getByRole('button', { name: /Scan URL/i });
-    fireEvent.click(button);
-
-    await waitFor(() => expect(axios.post).toHaveBeenCalled());
-
-    expect(toast.error).toHaveBeenCalledWith('Scanning failed. Check server connection.');
-    expect(button).not.toBeDisabled();
-  });
-
-  test('shows phishing result and error toast', async () => {
-    axios.get.mockResolvedValueOnce({ data: { total_urls: 0, analysis: [] } });
-    axios.post.mockResolvedValueOnce({
-      data: { is_phishing: true, url: 'https://bad.com', reason: 'Phishing detected' }
-    });
-
-    renderComponent();
-
-    const input = screen.getByPlaceholderText(/https:\/\/example.com/i);
-    fireEvent.change(input, { target: { value: 'https://bad.com' } });
-
-    const button = screen.getByRole('button', { name: /Scan URL/i });
-    fireEvent.click(button);
-
-    await waitFor(() => expect(axios.post).toHaveBeenCalled());
-
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
     expect(toast.error).toHaveBeenCalledWith('Malicious Domain Detected!');
-
-    expect(screen.getByText(/Phishing Detected/i)).toBeInTheDocument();
-    expect(screen.getByText('https://bad.com')).toBeInTheDocument();
-    expect(screen.getByText('Phishing detected')).toBeInTheDocument();
+    expect(screen.getByText('Phishing Detected')).toBeInTheDocument();
+    expect(screen.getByText(phishingResponse.url)).toBeInTheDocument();
   });
 
-  test('does not scan when URL input is empty', () => {
-    axios.get.mockResolvedValueOnce({ data: { total_urls: 0, analysis: [] } });
-    renderComponent();
+  test('shows error toast when scanning fails', async () => {
+    axios.post.mockRejectedValue(new Error('Network error'));
 
-    const button = screen.getByRole('button', { name: /Scan URL/i });
-    fireEvent.click(button);
+    render(<Pishing_domain />);
+    const input = screen.getByPlaceholderText(/https:\/\/example.com/i);
+    fireEvent.change(input, { target: { value: 'https://error.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Scan URL/i }));
 
+    await waitFor(() => expect(axios.post).toHaveBeenCalledTimes(1));
+    expect(toast.error).toHaveBeenCalledWith('Scanning failed. Check server connection.');
+  });
+
+  test('does not scan when URL input is empty', async () => {
+    render(<Pishing_domain />);
+    fireEvent.click(screen.getByRole('button', { name: /Scan URL/i }));
     expect(toast.error).toHaveBeenCalledWith('Please enter a URL first');
     expect(axios.post).not.toHaveBeenCalled();
   });

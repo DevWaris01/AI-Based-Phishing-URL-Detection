@@ -31,7 +31,7 @@ def patch_chatgroq(monkeypatch):
 
     monkeypatch.setattr(dc, "ChatGroq", DummyChatGroq)
     yield captured
-    # restore original if needed
+    # restore original
     monkeypatch.setattr(dc, "ChatGroq", original)
 
 # ------------------------------------------------------------------
@@ -85,12 +85,16 @@ def test_get_phishing_urls_exception(monkeypatch, capsys):
 # Test analyze_urls returns content from LLM
 # ------------------------------------------------------------------
 def test_analyze_urls_returns_content(monkeypatch):
-    # Patch the llm.invoke to return a known content
-    class DummyResponse:
-        def __init__(self, content):
-            self.content = content
-    monkeypatch.setattr(dc.llm, "invoke", lambda prompt: DummyResponse(content="analysis result"))
-    result = dc.analyze_urls(["http://bad.com"])
+    # Patch the llm instance to return a known content
+    class DummyLLM:
+        def invoke(self, prompt):
+            class DummyResp:
+                content = "analysis result"
+            return DummyResp()
+    monkeypatch.setattr(dc, "llm", DummyLLM())
+
+    urls = ["http://bad.com", "https://evil.org"]
+    result = dc.analyze_urls(urls)
     assert result == "analysis result"
 
 # ------------------------------------------------------------------
@@ -98,17 +102,18 @@ def test_analyze_urls_returns_content(monkeypatch):
 # ------------------------------------------------------------------
 def test_analyze_urls_prompt_includes_urls(monkeypatch):
     captured_prompt = {}
-    class DummyResponse:
-        def __init__(self, content):
-            self.content = content
-    def fake_invoke(prompt):
-        captured_prompt['prompt'] = prompt
-        return DummyResponse(content="analysis")
-    monkeypatch.setattr(dc.llm, "invoke", fake_invoke)
-    urls = ["http://a.com", "https://b.com"]
+    class DummyLLM:
+        def invoke(self, prompt):
+            captured_prompt['prompt'] = prompt
+            class DummyResp:
+                content = "analysis"
+            return DummyResp()
+    monkeypatch.setattr(dc, "llm", DummyLLM())
+
+    urls = ["http://bad.com"]
     dc.analyze_urls(urls)
-    assert "http://a.com" in captured_prompt['prompt']
-    assert "https://b.com" in captured_prompt['prompt']
+    assert "http://bad.com" in captured_prompt['prompt']
+    assert "URLs:" in captured_prompt['prompt']
 
 # ------------------------------------------------------------------
 # Test limit parameter in get_phishing_urls

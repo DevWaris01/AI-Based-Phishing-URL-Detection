@@ -76,7 +76,7 @@ def test_verify_otp_failure_expired(session, monkeypatch):
     assert otp.verify_otp("999999") is False
 
 def test_otp_expiry_default(session):
-    """The default expiry is 5 minutes from creation."""
+    """The default expiry is 5 minutes after creation."""
     user = User(user_name="eve", email="eve@example.com", password="secret")
     session.add(user)
     session.commit()
@@ -87,5 +87,5 @@ def test_otp_expiry_default(session):
     session.commit()
 
     now = datetime.utcnow()
-    # The expiry should be roughly 5 minutes ahead
-    assert now < otp.expiry_at <= now + timedelta(minutes=5, seconds=5)
+    # expiry should be roughly 5 minutes after now
+    assert abs((otp.expiry_at - now).total_seconds() - 300) < 5
